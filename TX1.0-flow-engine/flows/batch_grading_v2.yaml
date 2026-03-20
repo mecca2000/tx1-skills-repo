@@ -1,0 +1,107 @@
+flow:
+  id: "batch_grading_v2"
+  name: "批量作业批改流程 v2.0"
+  version: "2.0"
+
+trigger:
+  type: "command"
+  pattern: "批量批改 | 批改全部 | grade_all"
+
+performance:
+  parallel: true
+  max_workers: 8
+  cache_enabled: true
+  cache_size: 1000
+  cache_ttl: 3600
+
+nodes:
+  - id: "get_homework_list"
+    type: "task"
+    action: "list_homework"
+    timeout: 30
+    input:
+      status: "pending"
+    output:
+      homework_list: "${result.list}"
+      total_count: "${result.count}"
+
+  - id: "batch_process"
+    type: "parallel"
+    parallel_group: "batch"
+    max_parallel: 8
+    input_list: "${get_homework_list.homework_list}"
+    nodes:
+      - id: "ocr_single"
+        type: "skill"
+        skill: "paddleocr-doc-parsing"
+        input:
+          image: "${item.image}"
+        timeout: 60
+        output:
+          text: "${result.text}"
+      
+      - id: "grade_single"
+        type: "skill"
+        skill: "tencentcloud-ocr-questionmarkagent"
+        input:
+          content: "${ocr_single.text}"
+          subject: "${item.subject}"
+        timeout: 60
+        output:
+          score: "${result.score}"
+          feedback: "${result.feedback}"
+      
+      - id: "send_single"
+        type: "skill"
+        skill: "feishu-chat"
+        input:
+          message: "${grade_single.feedback}"
+          chat_id: "${item.student_chat_id}"
+        timeout: 30
+      
+      - id: "record_single"
+        type: "skill"
+        skill: "knowledge-distill"
+        input:
+          content: "${grade_single.feedback}"
+          category: "homework_graded"
+          student_id: "${item.student_id}"
+          score: "${grade_single.score}"
+        timeout: 30
+
+  - id: "generate_summary"
+    type: "skill"
+    skill: "data-analysis"
+    input:
+      batch_results: "${batch_process.results}"
+      metrics: ["avg_score", "pass_rate", "difficulty_distribution"]
+    timeout: 60
+    output:
+      summary_report: "${result.report}"
+
+  - id: "send_summary"
+    type: "skill"
+    skill: "feishu-chat"
+    input:
+      message: "${generate_summary.summary_report}"
+      chat_id: "teacher_group"
+    timeout: 30
+
+edges:
+  - from: "get_homework_list"
+    to: "batch_process"
+  
+  - from: "batch_process"
+    to: "generate_summary"
+  
+  - from: "generate_summary"
+    to: "send_summary"
+
+error_handler:
+  retry_count: 3
+  retry_delay: 5
+  fallback_node: "manual_batch_review"
+  notification:
+    type: "feishu"
+    recipient: "ou_6411571988fd02748bc696e0f01a489e"
+    message: "批量作业批改失败"

@@ -1,0 +1,194 @@
+flow:
+  id: "student_question_v2"
+  name: "学生问题解答流程 v2.0"
+  version: "2.0"
+
+trigger:
+  type: "feishu_message"
+  pattern: "提问 | 问题 | 不会 | 不懂"
+
+performance:
+  parallel: true
+  max_workers: 4
+  cache_enabled: true
+  cache_size: 500
+  cache_ttl: 1800
+
+nodes:
+  - id: "receive"
+    type: "task"
+    action: "receive_question"
+    timeout: 30
+    input: {}
+    output:
+      question_text: "${result.text}"
+      question_image: "${result.image}"
+
+  - id: "parallel_analysis"
+    type: "parallel"
+    parallel_group: "analysis"
+    nodes:
+      - id: "subject_classify"
+        type: "skill"
+        skill: "TX1.0-educational-psychology"
+        input:
+          text: "${receive.question_text}"
+        timeout: 30
+        output:
+          subject: "${result.subject}"
+      
+      - id: "ocr_if_needed"
+        type: "skill"
+        skill: "paddleocr-doc-parsing"
+        condition: "${receive.question_image} != null"
+        input:
+          image: "${receive.question_image}"
+        timeout: 60
+        output:
+          ocr_text: "${result.text}"
+      
+      - id: "knowledge_search"
+        type: "skill"
+        skill: "knowledge-graph-skill"
+        input:
+          query: "${receive.question_text}"
+        timeout: 30
+        output:
+          related_knowledge: "${result.nodes}"
+
+  - id: "merge_analysis"
+    type: "merge"
+    wait_for: ["subject_classify", "ocr_if_needed", "knowledge_search"]
+
+  - id: "solution_generate"
+    type: "skill"
+    skill: "problem-solving"
+    input:
+      subject: "${subject_classify.subject}"
+      question: "${receive.question_text}"
+      ocr_text: "${ocr_if_needed.ocr_text}"
+      knowledge: "${knowledge_search.related_knowledge}"
+    timeout: 60
+    output:
+      solution: "${result.solution}"
+      steps: "${result.steps}"
+
+  - id: "verify_solution"
+    type: "decision"
+    conditions:
+      - when: "${solution_generate.confidence} > 0.9"
+        then: "high_confidence"
+      - when: "${solution_generate.confidence} > 0.7"
+        then: "medium_confidence"
+      - default: "low_confidence"
+
+  - id: "high_confidence"
+    type: "task"
+    action: "mark_verified"
+    input:
+      verified: true
+
+  - id: "medium_confidence"
+    type: "skill"
+    skill: "reasoning"
+    input:
+      solution: "${solution_generate.solution}"
+    timeout: 30
+
+  - id: "low_confidence"
+    type: "task"
+    action: "flag_for_review"
+    input:
+      reason: "low_confidence"
+      confidence: "${solution_generate.confidence}"
+
+  - id: "feedback_format"
+    type: "skill"
+    skill: "TX1.0-social-communication"
+    input:
+      solution: "${solution_generate.solution}"
+      steps: "${solution_generate.steps}"
+      tone: "encouraging"
+      include_hints: true
+      student_level: "${context.student_level}"
+    timeout: 30
+    output:
+      formatted_response: "${result.message}"
+
+  - id: "send_answer"
+    type: "skill"
+    skill: "feishu-chat"
+    input:
+      message: "${feedback_format.formatted_response}"
+      chat_id: "${context.chat_id}"
+    timeout: 30
+
+  - id: "record_learning"
+    type: "skill"
+    skill: "knowledge-distill"
+    input:
+      content: "${receive.question_text}"
+      category: "question_answered"
+      subject: "${subject_classify.subject}"
+      difficulty: "${solution_generate.difficulty}"
+    timeout: 30
+
+  - id: "notify_if_needed"
+    type: "skill"
+    skill: "feishu-chat"
+    condition: "${verify_solution} == 'low_confidence'"
+    input:
+      message: "问题需要人工审核：${receive.question_text}"
+      priority: "medium"
+
+edges:
+  - from: "receive"
+    to: "parallel_analysis"
+  
+  - from: "parallel_analysis"
+    to: "merge_analysis"
+  
+  - from: "merge_analysis"
+    to: "solution_generate"
+  
+  - from: "solution_generate"
+    to: "verify_solution"
+  
+  - from: "verify_solution"
+    to: "high_confidence"
+    condition: "${verify_solution} == 'high_confidence'"
+  
+  - from: "verify_solution"
+    to: "medium_confidence"
+    condition: "${verify_solution} == 'medium_confidence'"
+  
+  - from: "verify_solution"
+    to: "low_confidence"
+    condition: "${verify_solution} == 'low_confidence'"
+  
+  - from: "high_confidence"
+    to: "feedback_format"
+  
+  - from: "medium_confidence"
+    to: "feedback_format"
+  
+  - from: "low_confidence"
+    to: "feedback_format"
+  
+  - from: "feedback_format"
+    to: "send_answer"
+  
+  - from: "send_answer"
+    to: "record_learning"
+  
+  - from: "record_learning"
+    to: "notify_if_needed"
+
+error_handler:
+  retry_count: 3
+  retry_delay: 5
+  fallback_node: "manual_review"
+  notification:
+    type: "feishu"
+    recipient: "ou_6411571988fd02748bc696e0f01a489e"
+    message: "学生问题解答流程失败，需要人工介入"
