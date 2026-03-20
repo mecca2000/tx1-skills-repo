@@ -1,0 +1,86 @@
+flow:
+  id: "paper_generation_v1"
+  name: "试卷生成流程"
+  version: "1.0"
+
+trigger:
+  type: "command"
+  pattern: "生成试卷 | 创建试卷 | 组卷"
+
+nodes:
+  - id: "select"
+    type: "task"
+    action: "select_knowledge_points"
+    timeout: 30
+    input:
+      subject: "${context.subject}"
+      grade: "${context.grade}"
+    output:
+      knowledge_points: "${result.points}"
+
+  - id: "difficulty"
+    type: "task"
+    action: "set_difficulty"
+    timeout: 10
+    input:
+      level: "${context.difficulty}"
+    output:
+      difficulty: "${result.level}"
+
+  - id: "search"
+    type: "skill"
+    skill: "exam"
+    input:
+      knowledge_points: "${select.knowledge_points}"
+      difficulty: "${difficulty.difficulty}"
+      count: 10
+    timeout: 60
+    output:
+      questions: "${result.questions}"
+
+  - id: "compose"
+    type: "task"
+    action: "compose_paper"
+    timeout: 30
+    input:
+      questions: "${search.questions}"
+      format: "word"
+    output:
+      paper: "${result.paper}"
+
+  - id: "convert"
+    type: "skill"
+    skill: "generate_word"
+    input:
+      content: "${compose.paper}"
+      title: "${context.title}"
+    timeout: 60
+    output:
+      file: "${result.file}"
+
+  - id: "archive"
+    type: "skill"
+    skill: "knowledge-capture"
+    input:
+      content: "${compose.paper}"
+      category: "paper"
+    timeout: 30
+    output:
+      archived: "${result}"
+
+edges:
+  - from: "select"
+    to: "difficulty"
+  - from: "difficulty"
+    to: "search"
+  - from: "search"
+    to: "compose"
+  - from: "compose"
+    to: "convert"
+  - from: "convert"
+    to: "archive"
+
+error_handler:
+  retry_count: 3
+  retry_delay: 5
+  fallback_node: "manual_compose"

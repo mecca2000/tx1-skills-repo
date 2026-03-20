@@ -1,0 +1,88 @@
+flow:
+  id: "tutor_grading_v1"
+  name: "学生作业批改流程"
+  version: "1.0"
+
+trigger:
+  type: "feishu_message"
+  pattern: "提交作业 | 交作业 | 批改"
+
+nodes:
+  - id: "receive"
+    type: "task"
+    action: "receive_homework"
+    timeout: 30
+    input: {}
+    output:
+      file: "${result.file}"
+
+  - id: "ocr"
+    type: "skill"
+    skill: "paddleocr-doc-parsing"
+    input:
+      image: "${receive.file}"
+    timeout: 60
+    output:
+      text: "${result.text}"
+
+  - id: "analyze"
+    type: "skill"
+    skill: "TX1.0-educational-psychology"
+    input:
+      text: "${ocr.text}"
+      student_id: "${context.student_id}"
+    timeout: 30
+    output:
+      subject: "${result.subject}"
+      knowledge_points: "${result.knowledge_points}"
+
+  - id: "grade"
+    type: "skill"
+    skill: "tencentcloud-ocr-questionmarkagent"
+    input:
+      content: "${ocr.text}"
+      subject: "${analyze.subject}"
+    timeout: 60
+    output:
+      result: "${result}"
+      score: "${result.score}"
+
+  - id: "feedback"
+    type: "skill"
+    skill: "TX1.0-social-communication"
+    input:
+      result: "${grade.result}"
+      tone: "encouraging"
+    timeout: 30
+    output:
+      message: "${result.message}"
+
+  - id: "record"
+    type: "skill"
+    skill: "knowledge-distill"
+    input:
+      content: "${grade.result}"
+      category: "wrong_question"
+    timeout: 30
+    output:
+      recorded: "${result}"
+
+edges:
+  - from: "receive"
+    to: "ocr"
+  - from: "ocr"
+    to: "analyze"
+  - from: "analyze"
+    to: "grade"
+  - from: "grade"
+    to: "feedback"
+  - from: "feedback"
+    to: "record"
+
+error_handler:
+  retry_count: 3
+  retry_delay: 5
+  fallback_node: "manual_review"
+  notification:
+    type: "feishu"
+    recipient: "ou_6411571988fd02748bc696e0f01a489e"
